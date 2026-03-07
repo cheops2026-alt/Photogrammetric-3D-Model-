@@ -42,6 +42,34 @@ If you would like to output a texture instead of vertex colors, use the `--bake-
 
 For detailed usage of this script, use `python run.py --help`.
 
+### Webcam Capture with OpenCV (runcv.py)
+`runcv.py` extends TripoSR with webcam support using OpenCV. Capture a photo from your camera and create a 3D model with realistic colors.
+
+**Requirements:** `pip install opencv-python`
+
+**Capture from webcam (default):**
+```sh
+python runcv.py
+```
+A live camera preview opens. Press **SPACE** or **S** to capture a photo, then the 3D model is generated. Press **Q** to quit without capturing.
+
+**Use an image file:**
+```sh
+python runcv.py examples/chair.png --output-dir output/
+```
+
+**Key options:**
+| Option | Description |
+|--------|--------------|
+| `--capture` | Explicitly use webcam capture mode |
+| `--camera N` | Use camera device ID (default: 0) |
+| `--no-bake-texture` | Use vertex colors instead of baked texture (faster) |
+| `--no-viewer` | Skip opening the 3D viewer after generation |
+
+By default, `runcv.py` bakes a texture atlas for accurate colors matching the original photo, and opens the result in a PyVista 3D viewer window.
+
+For detailed usage: `python runcv.py --help`
+
 ### Local Gradio App
 ```sh
 python gradio_app.py
