@@ -1,3 +1,4 @@
+# Photogrammetric-3D-Model - TripoSR with webcam capture
 omegaconf==2.3.0
 Pillow==10.1.0
 einops==0.7.0
@@ -10,3 +11,5 @@ imageio[ffmpeg]
 gradio
 xatlas==0.0.9
 moderngl==5.10.0
+opencv-python
+pyvista
