@@ -153,8 +153,8 @@ parser.add_argument("--pretrained-model-name-or-path",
                     default="stabilityai/TripoSR", type=str)
 parser.add_argument("--chunk-size", default=8192, type=int,
                     help="Chunk size for surface extraction. Default: 8192")
-parser.add_argument("--mc-resolution", default=320, type=int,
-                    help="Marching cubes resolution. Higher = more detail. Default: 320")
+parser.add_argument("--mc-resolution", default=384, type=int,
+                    help="Marching cubes resolution. Higher = more detail. Default: 384")
 parser.add_argument("--no-remove-bg", action="store_true",
                     help="Skip background removal (image must already have gray bg).")
 parser.add_argument("--foreground-ratio", default=0.85, type=float,
@@ -168,8 +168,8 @@ parser.add_argument("--bake-texture", action="store_true", default=True,
                     help="Bake texture atlas for realistic colors. Default: True")
 parser.add_argument("--no-bake-texture", action="store_true",
                     help="Use vertex colors instead (faster, less accurate).")
-parser.add_argument("--texture-resolution", default=2048, type=int,
-                    help="Texture atlas resolution. Default: 2048")
+parser.add_argument("--texture-resolution", default=4096, type=int,
+                    help="Texture atlas resolution. Default: 4096")
 parser.add_argument("--render", action="store_true",
                     help="Save a NeRF-rendered 360 video.")
 parser.add_argument("--no-viewer", action="store_true",
@@ -326,7 +326,7 @@ if not args.no_viewer and first_mesh_path and os.path.exists(first_mesh_path):
 
         pl = pv.Plotter(
             shape=(1, 2) if has_input else (1, 1),
-            window_size=[1200, 650] if has_input else [800, 650],
+            window_size=[1400, 700] if has_input else [900, 700],
         )
 
         # Left panel: input photo
@@ -334,24 +334,46 @@ if not args.no_viewer and first_mesh_path and os.path.exists(first_mesh_path):
             pl.subplot(0, 0)
             img_data = pv.read(input_png)
             pl.add_mesh(img_data, rgb=True)
-            pl.add_title("Input Photo", font_size=12)
+            pl.add_title("Input Photo", font_size=9)
             pl.view_xy()
             pl.subplot(0, 1)
 
-        # Right panel (or only panel): 3D mesh
+        # Right panel (or only panel): 3D mesh with improved rendering
         if has_texture:
             texture = pv.read_texture(first_texture_path)
-            pl.add_mesh(mesh, texture=texture, show_edges=False, smooth_shading=True)
+            pl.add_mesh(
+                mesh,
+                texture=texture,
+                show_edges=False,
+                smooth_shading=True,
+                specular=0.3,
+                specular_power=20,
+            )
         else:
-            pl.add_mesh(mesh, show_edges=False, smooth_shading=True,
-                        color="lightgray", pbr=True, metallic=0.1, roughness=0.5)
+            pl.add_mesh(
+                mesh,
+                show_edges=False,
+                smooth_shading=True,
+                color="lightgray",
+                pbr=True,
+                metallic=0.05,
+                roughness=0.4,
+                specular=0.5,
+            )
 
-        pl.add_light(pv.Light(position=(5, 5, 5), intensity=0.7))
-        pl.add_light(pv.Light(position=(-5, -5, 5), intensity=0.4))
+        # Three-point lighting for better depth perception
+        pl.add_light(pv.Light(position=(5, 5, 8),  intensity=0.8, light_type="scene light"))
+        pl.add_light(pv.Light(position=(-4, -3, 4), intensity=0.45, light_type="scene light"))
+        pl.add_light(pv.Light(position=(0, -6, -2), intensity=0.2, light_type="scene light"))
         pl.set_background("white")
-        pl.add_title(
-            f"TripoSR - 3D Output  |  drag: rotate  scroll: zoom  |  O: open save folder",
-            font_size=10
+        pl.add_title("3D Output", font_size=9)
+
+        # Bottom hint bar (small text)
+        pl.add_text(
+            "Drag: rotate   Scroll: zoom   O: open output folder",
+            position="lower_edge",
+            font_size=7,
+            color="gray",
         )
 
         # Press 'O' to open the save folder in Explorer
@@ -360,7 +382,7 @@ if not args.no_viewer and first_mesh_path and os.path.exists(first_mesh_path):
 
         pl.add_key_event("o", open_save_folder)
         pl.add_key_event("O", open_save_folder)
-
+        pl.reset_camera()
         pl.show(title="TripoSR - 3D Viewer")
     except Exception as e:
         logging.warning(f"Python viewer failed: {e}. Opening with system default...")
