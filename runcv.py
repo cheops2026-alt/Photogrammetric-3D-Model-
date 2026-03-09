@@ -2,6 +2,7 @@
 import argparse
 import logging
 import os
+import shutil
 import time
 
 import cv2
@@ -173,6 +174,9 @@ parser.add_argument("--render", action="store_true",
                     help="Save a NeRF-rendered 360 video.")
 parser.add_argument("--no-viewer", action="store_true",
                     help="Skip opening 3D viewer after generation.")
+parser.add_argument("--save-to", type=str, default=None,
+                    help="Copy the final mesh (and texture if any) to this folder after generation. "
+                         "Defaults to Desktop if not specified.")
 args = parser.parse_args()
 
 if args.no_bake_texture:
@@ -288,6 +292,23 @@ for i, image in enumerate(images):
         meshes[0].export(out_mesh_path)
         timer.end("Exporting mesh")
 
+# --- Download / Save copy ---
+save_dest = args.save_to if args.save_to else os.path.join(
+    os.path.expanduser("~"), "Desktop", "3DModel_Output"
+)
+if first_mesh_path and os.path.exists(first_mesh_path):
+    os.makedirs(save_dest, exist_ok=True)
+    shutil.copy2(first_mesh_path, save_dest)
+    logging.info(f"Mesh saved to: {os.path.join(save_dest, os.path.basename(first_mesh_path))}")
+    if first_texture_path and os.path.exists(first_texture_path):
+        shutil.copy2(first_texture_path, save_dest)
+        logging.info(f"Texture saved to: {os.path.join(save_dest, os.path.basename(first_texture_path))}")
+    # Also copy input photo if present
+    input_png = os.path.join(os.path.dirname(first_mesh_path), "input.png")
+    if os.path.exists(input_png):
+        shutil.copy2(input_png, save_dest)
+    print(f"\n  Output saved to: {os.path.abspath(save_dest)}\n")
+
 # --- 3D Viewer ---
 if not args.no_viewer and first_mesh_path and os.path.exists(first_mesh_path):
     logging.info("Opening 3D viewer...")
@@ -328,7 +349,18 @@ if not args.no_viewer and first_mesh_path and os.path.exists(first_mesh_path):
         pl.add_light(pv.Light(position=(5, 5, 5), intensity=0.7))
         pl.add_light(pv.Light(position=(-5, -5, 5), intensity=0.4))
         pl.set_background("white")
-        pl.add_title("TripoSR - 3D Output  (drag: rotate | scroll: zoom | R: reset)", font_size=10)
+        pl.add_title(
+            f"TripoSR - 3D Output  |  drag: rotate  scroll: zoom  |  O: open save folder",
+            font_size=10
+        )
+
+        # Press 'O' to open the save folder in Explorer
+        def open_save_folder():
+            os.startfile(os.path.abspath(save_dest))
+
+        pl.add_key_event("o", open_save_folder)
+        pl.add_key_event("O", open_save_folder)
+
         pl.show(title="TripoSR - 3D Viewer")
     except Exception as e:
         logging.warning(f"Python viewer failed: {e}. Opening with system default...")
