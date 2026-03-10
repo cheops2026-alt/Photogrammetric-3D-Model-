@@ -72,6 +72,39 @@ By default, `runcv.py` bakes a texture atlas for accurate colors matching the or
 
 For detailed usage: `python runcv.py --help`
 
+### Save / Export (On-Demand)
+
+The output is **not saved automatically**. Use the 3D viewer keyboard shortcuts to save when you want:
+
+- **S** – Save the OBJ mesh, texture, and input photo to the output folder
+- **G** – Export and save a self-contained `.glb` file (Blender, Windows 3D Viewer, glTF-compatible tools)
+
+### AI Refinement (Optional)
+
+TripoSR generates geometry from a single image, so the back side of objects is hallucinated. To improve realism, you can optionally send the initial mesh to an external AI service for back-side completion and refinement.
+
+**Usage:**
+```sh
+python runcv.py --refine-api-url https://your-service.example.com/refine --refine-api-key YOUR_KEY
+```
+
+The service receives the input photo and initial mesh via multipart POST and should return either a refined `.glb` binary or a JSON with a download URL. If the service is unavailable or not configured, the pipeline falls back to the standard TripoSR output.
+
+| Option | Description |
+|--------|-------------|
+| `--refine-api-url URL` | Endpoint of the AI refinement service |
+| `--refine-api-key KEY` | Bearer token for the refinement service |
+
+### 3D Viewer Keyboard Shortcuts
+
+| Key | Action |
+|-----|--------|
+| **S** | Save mesh, texture, and input photo to the output folder |
+| **G** | Export and save the model as a `.glb` file |
+| **O** | Open the output folder in Explorer |
+| Drag | Rotate the 3D model |
+| Scroll | Zoom in / out |
+
 ### Local Gradio App
 ```sh
 python gradio_app.py
@@ -105,3 +138,7 @@ pip install git+https://github.com/tatsy/torchmcubes.git
   year={2024}
 }
 ```
+
+---
+
+*Made by Cheops team*

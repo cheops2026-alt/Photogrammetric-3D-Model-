@@ -2,7 +2,6 @@
 import argparse
 import logging
 import os
-import shutil
 import time
 
 import cv2
@@ -15,6 +14,7 @@ from PIL import Image, ImageEnhance, ImageFilter
 from tsr.system import TSR
 from tsr.utils import remove_background, resize_foreground, save_video
 from tsr.bake_texture import bake_texture
+from model_utils import refine_mesh_with_ai, export_glb, show_viewer
 
 
 def enhance_image(img: Image.Image) -> Image.Image:
@@ -177,6 +177,10 @@ parser.add_argument("--no-viewer", action="store_true",
 parser.add_argument("--save-to", type=str, default=None,
                     help="Copy the final mesh (and texture if any) to this folder after generation. "
                          "Defaults to Desktop if not specified.")
+parser.add_argument("--refine-api-url", type=str, default=None,
+                    help="URL of an online AI service for back-side completion and mesh refinement.")
+parser.add_argument("--refine-api-key", type=str, default=None,
+                    help="Bearer token / API key for the refinement service.")
 args = parser.parse_args()
 
 if args.no_bake_texture:
@@ -292,98 +296,35 @@ for i, image in enumerate(images):
         meshes[0].export(out_mesh_path)
         timer.end("Exporting mesh")
 
-# --- Download / Save copy ---
+# --- AI Refinement (optional) ---
+if first_mesh_path and os.path.exists(first_mesh_path) and args.refine_api_url:
+    input_img_for_refine = os.path.join(os.path.dirname(first_mesh_path), "input.png")
+    first_mesh_path, first_texture_path = refine_mesh_with_ai(
+        mesh_path=first_mesh_path,
+        texture_path=first_texture_path,
+        input_image_path=input_img_for_refine if os.path.exists(input_img_for_refine) else None,
+        output_dir=os.path.dirname(first_mesh_path),
+        api_url=args.refine_api_url,
+        api_key=args.refine_api_key,
+    )
+
+# --- Save destination (used by viewer buttons, nothing is copied automatically) ---
 save_dest = args.save_to if args.save_to else os.path.join(
     os.path.expanduser("~"), "Desktop", "3DModel_Output"
 )
-if first_mesh_path and os.path.exists(first_mesh_path):
-    os.makedirs(save_dest, exist_ok=True)
-    shutil.copy2(first_mesh_path, save_dest)
-    logging.info(f"Mesh saved to: {os.path.join(save_dest, os.path.basename(first_mesh_path))}")
-    if first_texture_path and os.path.exists(first_texture_path):
-        shutil.copy2(first_texture_path, save_dest)
-        logging.info(f"Texture saved to: {os.path.join(save_dest, os.path.basename(first_texture_path))}")
-    # Also copy input photo if present
-    input_png = os.path.join(os.path.dirname(first_mesh_path), "input.png")
-    if os.path.exists(input_png):
-        shutil.copy2(input_png, save_dest)
-    print(f"\n  Output saved to: {os.path.abspath(save_dest)}\n")
 
 # --- 3D Viewer ---
 if not args.no_viewer and first_mesh_path and os.path.exists(first_mesh_path):
     logging.info("Opening 3D viewer...")
+    input_png = os.path.join(os.path.dirname(os.path.abspath(first_mesh_path)), "input.png")
     try:
-        os.environ["VTK_LOGGING_LEVEL"] = "ERROR"
-        import pyvista as pv
-
-        mesh_path = os.path.abspath(first_mesh_path)
-        mesh = pv.read(mesh_path)
-
-        # Side-by-side: input image + 3D model
-        input_png = os.path.join(os.path.dirname(mesh_path), "input.png")
-        has_input = os.path.exists(input_png)
-        has_texture = first_texture_path and os.path.exists(first_texture_path)
-
-        pl = pv.Plotter(
-            shape=(1, 2) if has_input else (1, 1),
-            window_size=[1400, 700] if has_input else [900, 700],
+        show_viewer(
+            mesh_path=first_mesh_path,
+            texture_path=first_texture_path,
+            save_dest=save_dest,
+            input_photo_path=input_png if os.path.exists(input_png) else None,
+            title_prefix="Cheops",
         )
-
-        # Left panel: input photo
-        if has_input:
-            pl.subplot(0, 0)
-            img_data = pv.read(input_png)
-            pl.add_mesh(img_data, rgb=True)
-            pl.add_title("Input Photo", font_size=9)
-            pl.view_xy()
-            pl.subplot(0, 1)
-
-        # Right panel (or only panel): 3D mesh with improved rendering
-        if has_texture:
-            texture = pv.read_texture(first_texture_path)
-            pl.add_mesh(
-                mesh,
-                texture=texture,
-                show_edges=False,
-                smooth_shading=True,
-                specular=0.3,
-                specular_power=20,
-            )
-        else:
-            pl.add_mesh(
-                mesh,
-                show_edges=False,
-                smooth_shading=True,
-                color="lightgray",
-                pbr=True,
-                metallic=0.05,
-                roughness=0.4,
-                specular=0.5,
-            )
-
-        # Three-point lighting for better depth perception
-        pl.add_light(pv.Light(position=(5, 5, 8),  intensity=0.8, light_type="scene light"))
-        pl.add_light(pv.Light(position=(-4, -3, 4), intensity=0.45, light_type="scene light"))
-        pl.add_light(pv.Light(position=(0, -6, -2), intensity=0.2, light_type="scene light"))
-        pl.set_background("white")
-        pl.add_title("3D Output", font_size=9)
-
-        # Bottom hint bar (small text)
-        pl.add_text(
-            "Drag: rotate   Scroll: zoom   O: open output folder",
-            position="lower_edge",
-            font_size=7,
-            color="gray",
-        )
-
-        # Press 'O' to open the save folder in Explorer
-        def open_save_folder():
-            os.startfile(os.path.abspath(save_dest))
-
-        pl.add_key_event("o", open_save_folder)
-        pl.add_key_event("O", open_save_folder)
-        pl.reset_camera()
-        pl.show(title="TripoSR - 3D Viewer")
     except Exception as e:
         logging.warning(f"Python viewer failed: {e}. Opening with system default...")
         os.startfile(os.path.abspath(first_mesh_path))
