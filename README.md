@@ -38,9 +38,12 @@ The model is released under the MIT license, which includes the source code, pre
 ```sh
 python run.py examples/chair.png --output-dir output/
 ```
+
+Run with **no arguments** to open a **file picker** and choose image(s) from your PC (or it falls back to `examples/chair.png` if present). By default, `run.py` **bakes a high-resolution texture** (4096), uses higher marching-cubes detail (384), and enhances the input image for better color. The 3D viewer includes a **Save GLB** checkbox (top-left) and the **G** key to export `.glb`.
+
 This will save the reconstructed 3D model to `output/`. You can also specify more than one image path separated by spaces. The default options takes about **6GB VRAM** for a single image input.
 
-If you would like to output a texture instead of vertex colors, use the `--bake-texture` option. You may also use `--texture-resolution` to specify the resolution in pixels of the output texture.
+Use `--no-bake-texture` for vertex colors only (faster). Use `--texture-resolution` to change atlas size.
 
 For detailed usage of this script, use `python run.py --help`.
 

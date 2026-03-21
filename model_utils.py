@@ -227,6 +227,32 @@ def show_viewer(
         except Exception as exc:
             logging.warning(f"GLB export failed: {exc}")
 
+    # Clickable checkbox (top-left) — same as G / download GLB
+    def _on_glb_checkbox(state: bool) -> None:
+        if state:
+            save_glb()
+
+    try:
+        pl.add_checkbox_button_widget(
+            callback=_on_glb_checkbox,
+            value=False,
+            position=(10.0, 10.0),
+            size=44,
+            border_size=3,
+            color_on="seagreen",
+            color_off="lightgray",
+            background_color="white",
+        )
+        pl.add_text(
+            "Save GLB",
+            position=(62.0, 18.0),
+            font_size=9,
+            color="dimgray",
+            viewport=True,
+        )
+    except Exception as exc:
+        logging.debug(f"Checkbox widget not added: {exc}")
+
     def open_save_folder():
         """O key: open the output folder in Explorer."""
         if os.path.exists(_save_dest):

@@ -8,11 +8,43 @@ import numpy as np
 import rembg
 import torch
 import xatlas
-from PIL import Image
+from PIL import Image, ImageEnhance
 
 from tsr.system import TSR
 from tsr.utils import remove_background, resize_foreground, save_video
 from tsr.bake_texture import bake_texture
+from model_utils import show_viewer
+
+
+def enhance_image(img: Image.Image) -> Image.Image:
+    """Improve contrast, sharpness, and color for better reconstruction and texture."""
+    img = ImageEnhance.Contrast(img).enhance(1.15)
+    img = ImageEnhance.Sharpness(img).enhance(1.5)
+    img = ImageEnhance.Color(img).enhance(1.2)
+    return img
+
+
+def pick_images_via_dialog() -> list[str]:
+    """Open a native file dialog to choose one or more images."""
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        paths = filedialog.askopenfilenames(
+            title="Select image(s) for 3D reconstruction",
+            filetypes=[
+                ("Image files", "*.png *.jpg *.jpeg *.webp *.bmp"),
+                ("All files", "*.*"),
+            ],
+        )
+        root.destroy()
+        return list(paths) if paths else []
+    except Exception as exc:
+        logging.warning(f"File dialog unavailable: {exc}")
+        return []
 
 
 class Timer:
@@ -45,7 +77,12 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 parser = argparse.ArgumentParser()
-parser.add_argument("image", type=str, nargs="+", help="Path to input image(s).")
+parser.add_argument(
+    "image",
+    type=str,
+    nargs="*",
+    help="Path to input image(s). Omit to use examples/chair.png if present.",
+)
 parser.add_argument(
     "--device",
     default="cuda:0",
@@ -66,9 +103,9 @@ parser.add_argument(
 )
 parser.add_argument(
     "--mc-resolution",
-    default=256,
+    default=384,
     type=int,
-    help="Marching cubes grid resolution. Default: 256"
+    help="Marching cubes grid resolution (higher = more detail). Default: 384",
 )
 parser.add_argument(
     "--no-remove-bg",
@@ -97,13 +134,25 @@ parser.add_argument(
 parser.add_argument(
     "--bake-texture",
     action="store_true",
-    help="Bake a texture atlas for the extracted mesh, instead of vertex colors",
+    default=True,
+    help="Bake a texture atlas for realistic colors (default: on)",
+)
+parser.add_argument(
+    "--no-bake-texture",
+    action="store_true",
+    help="Use vertex colors only (faster, less detailed color)",
 )
 parser.add_argument(
     "--texture-resolution",
-    default=2048,
+    default=4096,
     type=int,
-    help="Texture atlas resolution, only useful with --bake-texture. Default: 2048"
+    help="Texture atlas resolution (higher = sharper). Default: 4096",
+)
+parser.add_argument(
+    "--save-to",
+    type=str,
+    default=None,
+    help="Folder used when saving from the 3D viewer (S / G / checkbox). Default: Desktop/3DModel_Output",
 )
 parser.add_argument(
     "--render",
@@ -117,9 +166,37 @@ parser.add_argument(
 )
 args = parser.parse_args()
 
+if args.no_bake_texture:
+    args.bake_texture = False
+
+# No paths on CLI → open file picker, then optional example fallback
+if not args.image:
+    picked = pick_images_via_dialog()
+    if picked:
+        args.image = picked
+        logging.info(f"Selected {len(picked)} image(s) from file dialog.")
+    else:
+        _here = os.path.dirname(os.path.abspath(__file__))
+        _default_img = os.path.join(_here, "examples", "chair.png")
+        if os.path.isfile(_default_img):
+            args.image = [_default_img]
+            logging.info(f"No image selected; using default example: {_default_img}")
+        else:
+            parser.error(
+                "No input image. Choose a file in the dialog, or run e.g.:\n"
+                "  python run.py path/to/photo.png\n"
+                f"Or add examples/chair.png under {_here}"
+            )
+
 output_dir = args.output_dir
 os.makedirs(output_dir, exist_ok=True)
 first_mesh_path = None
+first_texture_path = None
+save_dest = (
+    args.save_to
+    if args.save_to
+    else os.path.join(os.path.expanduser("~"), "Desktop", "3DModel_Output")
+)
 
 device = args.device
 if not torch.cuda.is_available():
@@ -147,7 +224,9 @@ for i, image_path in enumerate(args.image):
     if args.no_remove_bg:
         image = np.array(Image.open(image_path).convert("RGB"))
     else:
-        image = remove_background(Image.open(image_path), rembg_session)
+        pil_in = Image.open(image_path).convert("RGB")
+        pil_in = enhance_image(pil_in)
+        image = remove_background(pil_in, rembg_session)
         image = resize_foreground(image, args.foreground_ratio)
         image = np.array(image).astype(np.float32) / 255.0
         image = image[:, :, :3] * image[:, :, 3:4] + (1 - image[:, :, 3:4]) * 0.5
@@ -185,6 +264,8 @@ for i, image in enumerate(images):
         first_mesh_path = out_mesh_path
     if args.bake_texture:
         out_texture_path = os.path.join(output_dir, str(i), "texture.png")
+        if first_texture_path is None:
+            first_texture_path = out_texture_path
 
         timer.start("Baking texture")
         bake_output = bake_texture(meshes[0], model, scene_codes[0], args.texture_resolution)
@@ -199,16 +280,18 @@ for i, image in enumerate(images):
         meshes[0].export(out_mesh_path)
         timer.end("Exporting mesh")
 
-# Open 3D model in a Python viewer window
+# 3D viewer: textured preview + Save GLB checkbox / G key
 if not args.no_viewer and first_mesh_path and os.path.exists(first_mesh_path):
     logging.info("Opening 3D viewer...")
+    input_png = os.path.join(os.path.dirname(os.path.abspath(first_mesh_path)), "input.png")
     try:
-        os.environ["VTK_LOGGING_LEVEL"] = "ERROR"  # Reduce VTK log spam
-        import pyvista as pv
-        mesh = pv.read(os.path.abspath(first_mesh_path))
-        pl = pv.Plotter(window_size=[800, 600])
-        pl.add_mesh(mesh, show_edges=False)
-        pl.show(title="TripoSR - 3D Output")
+        show_viewer(
+            mesh_path=first_mesh_path,
+            texture_path=first_texture_path,
+            save_dest=save_dest,
+            input_photo_path=input_png if os.path.exists(input_png) else None,
+            title_prefix="TripoSR",
+        )
     except Exception as e:
         logging.warning(f"Python viewer failed: {e}. Opening with system default...")
         os.startfile(os.path.abspath(first_mesh_path))
