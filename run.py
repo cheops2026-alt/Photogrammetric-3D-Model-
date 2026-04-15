@@ -1,20 +1,16 @@
-# Photogrammetric-3D-Model
 import argparse
 import logging
 import os
 import time
-
 import numpy as np
 import rembg
 import torch
 import xatlas
 from PIL import Image, ImageEnhance
-
 from tsr.system import TSR
 from tsr.utils import remove_background, resize_foreground, save_video
 from tsr.bake_texture import bake_texture
 from model_utils import show_viewer
-
 
 def enhance_image(img: Image.Image) -> Image.Image:
     """Improve contrast, sharpness, and color for better reconstruction and texture."""
@@ -22,7 +18,6 @@ def enhance_image(img: Image.Image) -> Image.Image:
     img = ImageEnhance.Sharpness(img).enhance(1.5)
     img = ImageEnhance.Color(img).enhance(1.2)
     return img
-
 
 def pick_images_via_dialog() -> list[str]:
     """Open a native file dialog to choose one or more images."""
@@ -45,7 +40,6 @@ def pick_images_via_dialog() -> list[str]:
     except Exception as exc:
         logging.warning(f"File dialog unavailable: {exc}")
         return []
-
 
 class Timer:
     def __init__(self):
@@ -71,7 +65,6 @@ class Timer:
 
 
 timer = Timer()
-
 
 logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO
@@ -280,7 +273,6 @@ for i, image in enumerate(images):
         meshes[0].export(out_mesh_path)
         timer.end("Exporting mesh")
 
-# 3D viewer: textured preview + Save GLB checkbox / G key
 if not args.no_viewer and first_mesh_path and os.path.exists(first_mesh_path):
     logging.info("Opening 3D viewer...")
     input_png = os.path.join(os.path.dirname(os.path.abspath(first_mesh_path)), "input.png")
