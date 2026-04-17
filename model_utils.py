@@ -153,9 +153,23 @@ def show_viewer(
     import pyvista as pv
 
     mesh = pv.read(os.path.abspath(mesh_path))
+    # Fix invisible / black mesh: ensure normals (required for lit textured surfaces)
+    if "Normals" not in mesh.point_data and "Normals" not in mesh.cell_data:
+        mesh = mesh.compute_normals(inplace=False)
 
     has_input = input_photo_path and os.path.exists(input_photo_path)
     has_texture = texture_path and os.path.exists(texture_path)
+    # Textured draw needs UVs; refined meshes may lose them → black surface without fallback
+    _uv_keys = ("TCoords", "Texture Coordinates", "tcoords", "UV", "uv")
+    has_uv = any(k in mesh.point_data for k in _uv_keys) or bool(
+        getattr(mesh, "active_t_coords", None) is not None
+    )
+    if has_texture and not has_uv:
+        logging.warning(
+            "Mesh has no UV coordinates; showing shaded surface without image texture "
+            "(re-export from TripoSR with --no-depth-enhance to keep UVs)."
+        )
+        has_texture = False
 
     pl = pv.Plotter(
         shape=(1, 2) if has_input else (1, 1),
@@ -170,22 +184,35 @@ def show_viewer(
         pl.view_xy()
         pl.subplot(0, 1)
 
+    # Strong ambient + diffuse so the mesh is never black (SSAO removed — it often blacks out on Windows)
     if has_texture:
         texture = pv.read_texture(texture_path)
         pl.add_mesh(
-            mesh, texture=texture, show_edges=False,
-            smooth_shading=True, specular=0.3, specular_power=20,
+            mesh,
+            texture=texture,
+            show_edges=False,
+            smooth_shading=True,
+            ambient=0.45,
+            diffuse=0.65,
+            specular=0.35,
+            specular_power=20.0,
         )
     else:
         pl.add_mesh(
-            mesh, show_edges=False, smooth_shading=True,
-            color="lightgray", pbr=True, metallic=0.05,
-            roughness=0.4, specular=0.5,
+            mesh,
+            show_edges=False,
+            smooth_shading=True,
+            color="lightgray",
+            ambient=0.5,
+            diffuse=0.55,
+            specular=0.3,
         )
 
-    pl.add_light(pv.Light(position=(5,  5,  8), intensity=0.8,  light_type="scene light"))
-    pl.add_light(pv.Light(position=(-4, -3,  4), intensity=0.45, light_type="scene light"))
-    pl.add_light(pv.Light(position=(0,  -6, -2), intensity=0.2,  light_type="scene light"))
+    # Three-point lighting (moderate intensity — avoids over-darkening with VTK)
+    pl.add_light(pv.Light(position=(5, 5, 8), intensity=0.55, light_type="scene light"))
+    pl.add_light(pv.Light(position=(-4, -3, 4), intensity=0.35, light_type="scene light"))
+    pl.add_light(pv.Light(position=(0, -5, -2), intensity=0.2, light_type="scene light"))
+
     pl.set_background("white")
     pl.add_title("3D Output", font_size=9)
     pl.add_text(
@@ -266,5 +293,7 @@ def show_viewer(
     pl.add_key_event("G", save_glb)
     pl.add_key_event("o", open_save_folder)
     pl.add_key_event("O", open_save_folder)
+    if has_input:
+        pl.subplot(0, 1)
     pl.reset_camera()
     pl.show(title=f"{title_prefix} - 3D Viewer")

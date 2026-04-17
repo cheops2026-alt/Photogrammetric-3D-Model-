@@ -1,3 +1,10 @@
+# TripoSR pipeline: turn one or more photos into a 3D mesh (and optional texture).
+# Rough order of phases:
+#   1) Pick input images (CLI, file dialog, or default example).
+#   2) Load the TripoSR model on GPU or CPU.
+#   3) For each image: clean the photo, run the model, extract mesh, bake/export.
+#   4) Optionally refine geometry with depth, multi-view fusion, or an AI API.
+#   5) Optionally open a 3D viewer to inspect and save results.
 import argparse
 import logging
 import os
@@ -6,21 +13,35 @@ import numpy as np
 import rembg
 import torch
 import xatlas
-from PIL import Image, ImageEnhance
+from PIL import Image, ImageEnhance, ImageFilter
 from tsr.system import TSR
 from tsr.utils import remove_background, resize_foreground, save_video
 from tsr.bake_texture import bake_texture
-from model_utils import show_viewer
+from model_utils import refine_mesh_with_ai, show_viewer
+from depth_enhance import (
+    enhance_mesh_with_depth,
+    multi_view_depth_fusion,
+)
 
 def enhance_image(img: Image.Image) -> Image.Image:
-    """Improve contrast, sharpness, and color for better reconstruction and texture."""
+    """Make the input photo a bit stronger before the model sees it (contrast, sharpness, color)."""
     img = ImageEnhance.Contrast(img).enhance(1.15)
     img = ImageEnhance.Sharpness(img).enhance(1.5)
     img = ImageEnhance.Color(img).enhance(1.2)
     return img
 
+def enhance_texture(tex: Image.Image) -> Image.Image:
+    """Polish the baked texture image after it is created (sharper, richer colors)."""
+    tex = ImageEnhance.Sharpness(tex).enhance(1.6)
+    tex = ImageEnhance.Color(tex).enhance(1.15)
+    tex = ImageEnhance.Contrast(tex).enhance(1.08)
+    tex = tex.filter(ImageFilter.SMOOTH_MORE)
+    tex = ImageEnhance.Sharpness(tex).enhance(1.3)
+    return tex
+
+
 def pick_images_via_dialog() -> list[str]:
-    """Open a native file dialog to choose one or more images."""
+    """Let the user pick image files with a normal desktop file window (Windows/macOS/Linux)."""
     try:
         import tkinter as tk
         from tkinter import filedialog
@@ -42,9 +63,11 @@ def pick_images_via_dialog() -> list[str]:
         return []
 
 class Timer:
+    """Simple stopwatch: logs when a step starts and how long it took (uses milliseconds)."""
+
     def __init__(self):
         self.items = {}
-        self.time_scale = 1000.0  # ms
+        self.time_scale = 1000.0  # convert seconds to milliseconds for display
         self.time_unit = "ms"
 
     def start(self, name: str) -> None:
@@ -66,9 +89,11 @@ class Timer:
 
 timer = Timer()
 
+# --- Logging: print messages with time and level to the console ---
 logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO
 )
+# --- Phase 0: read command-line flags (paths, quality, optional features) ---
 parser = argparse.ArgumentParser()
 parser.add_argument(
     "image",
@@ -157,12 +182,50 @@ parser.add_argument(
     action="store_true",
     help="Do not open the output mesh after generation. Default: false",
 )
+parser.add_argument(
+    "--refine-api-url",
+    type=str,
+    default=None,
+    help="URL of an online AI service for back-side completion / mesh refinement.",
+)
+parser.add_argument(
+    "--refine-api-key",
+    type=str,
+    default=None,
+    help="Bearer token / API key for the refinement service.",
+)
+parser.add_argument(
+    "--depth-enhance",
+    action="store_true",
+    default=True,
+    help="Use MiDaS depth estimation to refine mesh geometry (default: on).",
+)
+parser.add_argument(
+    "--no-depth-enhance",
+    action="store_true",
+    help="Skip MiDaS depth-based mesh refinement.",
+)
+parser.add_argument(
+    "--smooth-iterations",
+    type=int,
+    default=2,
+    help="Laplacian smoothing passes during mesh refinement. Default: 2",
+)
+parser.add_argument(
+    "--multi-view",
+    action="store_true",
+    help="When multiple images are given, also run multi-view depth fusion.",
+)
 args = parser.parse_args()
 
+# Turn "negative" flags into simple on/off settings the rest of the script can read.
 if args.no_bake_texture:
     args.bake_texture = False
+if args.no_depth_enhance:
+    args.depth_enhance = False
 
-# No paths on CLI → open file picker, then optional example fallback
+# --- Phase 1: decide which image file(s) to use ---
+# If the user did not pass paths on the command line: open a file picker, then fall back to a built-in example.
 if not args.image:
     picked = pick_images_via_dialog()
     if picked:
@@ -181,20 +244,25 @@ if not args.image:
                 f"Or add examples/chair.png under {_here}"
             )
 
+# Where to write meshes, textures, and debug images (subfolders per image index).
 output_dir = args.output_dir
 os.makedirs(output_dir, exist_ok=True)
+# Remember the first mesh/texture so later optional steps and the viewer know what to open.
 first_mesh_path = None
 first_texture_path = None
+# Folder used when the user saves from the 3D viewer (hotkeys / UI).
 save_dest = (
     args.save_to
     if args.save_to
     else os.path.join(os.path.expanduser("~"), "Desktop", "3DModel_Output")
 )
 
+# Use CUDA if available; otherwise run on CPU (slower but works without a GPU).
 device = args.device
 if not torch.cuda.is_available():
     device = "cpu"
 
+# --- Phase 2: load TripoSR weights and move the model to the chosen device ---
 timer.start("Initializing model")
 model = TSR.from_pretrained(
     args.pretrained_model_name_or_path,
@@ -205,18 +273,22 @@ model.renderer.set_chunk_size(args.chunk_size)
 model.to(device)
 timer.end("Initializing model")
 
+# --- Phase 3: prepare each input image (background removal + crop, or use as-is) ---
 timer.start("Processing images")
 images = []
 
 if args.no_remove_bg:
     rembg_session = None
 else:
+    # One shared session speeds up repeated background removal.
     rembg_session = rembg.new_session()
 
 for i, image_path in enumerate(args.image):
     if args.no_remove_bg:
+        # User already prepared an RGB image on gray background; load it directly.
         image = np.array(Image.open(image_path).convert("RGB"))
     else:
+        # Typical path: enhance → cut out subject → place on gray → save a copy as input.png.
         pil_in = Image.open(image_path).convert("RGB")
         pil_in = enhance_image(pil_in)
         image = remove_background(pil_in, rembg_session)
@@ -230,14 +302,17 @@ for i, image_path in enumerate(args.image):
     images.append(image)
 timer.end("Processing images")
 
+# --- Phase 4: for each prepared image, run inference and export mesh (and texture if enabled) ---
 for i, image in enumerate(images):
     logging.info(f"Running image {i + 1}/{len(images)} ...")
 
+    # Encode the image into an internal scene representation (the neural forward pass).
     timer.start("Running model")
     with torch.no_grad():
         scene_codes = model([image], device=device)
     timer.end("Running model")
 
+    # Optional: save many rendered views and a short video (helps debug or presentations).
     if args.render:
         timer.start("Rendering")
         render_images = model.render(scene_codes, n_views=30, return_type="pil")
@@ -248,10 +323,12 @@ for i, image in enumerate(images):
         )
         timer.end("Rendering")
 
+    # Turn the learned field into a triangle mesh (marching cubes at mc_resolution).
     timer.start("Extracting mesh")
     meshes = model.extract_mesh(scene_codes, not args.bake_texture, resolution=args.mc_resolution)
     timer.end("Extracting mesh")
 
+    # Paths for this image index (e.g. output/0/mesh.obj).
     out_mesh_path = os.path.join(output_dir, str(i), f"mesh.{args.model_save_format}")
     if first_mesh_path is None:
         first_mesh_path = out_mesh_path
@@ -260,19 +337,81 @@ for i, image in enumerate(images):
         if first_texture_path is None:
             first_texture_path = out_texture_path
 
+        # Unwrap the mesh to a 2D texture atlas and sample colors from the model.
         timer.start("Baking texture")
         bake_output = bake_texture(meshes[0], model, scene_codes[0], args.texture_resolution)
         timer.end("Baking texture")
 
+        # Write OBJ (or GLB path elsewhere) with UVs plus the PNG texture file.
         timer.start("Exporting mesh and texture")
-        xatlas.export(out_mesh_path, meshes[0].vertices[bake_output["vmapping"]], bake_output["indices"], bake_output["uvs"], meshes[0].vertex_normals[bake_output["vmapping"]])
-        Image.fromarray((bake_output["colors"] * 255.0).astype(np.uint8)).transpose(Image.FLIP_TOP_BOTTOM).save(out_texture_path)
+        xatlas.export(
+            out_mesh_path,
+            meshes[0].vertices[bake_output["vmapping"]],
+            bake_output["indices"],
+            bake_output["uvs"],
+            meshes[0].vertex_normals[bake_output["vmapping"]],
+        )
+        tex_img = Image.fromarray(
+            (bake_output["colors"] * 255.0).astype(np.uint8)
+        ).transpose(Image.FLIP_TOP_BOTTOM)
+        tex_img = enhance_texture(tex_img)
+        tex_img.save(out_texture_path, quality=95)
         timer.end("Exporting mesh and texture")
     else:
+        # Vertex colors only: faster export, no separate texture file.
         timer.start("Exporting mesh")
         meshes[0].export(out_mesh_path)
         timer.end("Exporting mesh")
 
+# --- Phase 5 (optional): use depth from the photo to improve mesh shape (MiDaS) ---
+# Only runs on the first output mesh; needs input.png next to that mesh.
+if args.depth_enhance and first_mesh_path and os.path.exists(first_mesh_path):
+    input_img_for_depth = os.path.join(os.path.dirname(first_mesh_path), "input.png")
+    if os.path.exists(input_img_for_depth):
+        timer.start("Depth-based mesh enhancement")
+        try:
+            refined_path, _ = enhance_mesh_with_depth(
+                mesh_path=first_mesh_path,
+                texture_path=first_texture_path,
+                input_image_path=input_img_for_depth,
+                output_dir=os.path.dirname(first_mesh_path),
+                device=device,
+                smooth_iterations=args.smooth_iterations,
+            )
+            first_mesh_path = refined_path
+        except Exception as exc:
+            logging.warning(f"Depth enhancement failed: {exc}. Using original mesh.")
+        timer.end("Depth-based mesh enhancement")
+
+# --- Phase 6 (optional): combine depth from several photos into one extra mesh ---
+if args.multi_view and len(args.image) > 1:
+    timer.start("Multi-view depth fusion")
+    try:
+        mv_dir = os.path.join(output_dir, "multiview")
+        os.makedirs(mv_dir, exist_ok=True)
+        mv_mesh_path = multi_view_depth_fusion(
+            image_paths=args.image,
+            output_dir=mv_dir,
+            device=device,
+        )
+        logging.info(f"Multi-view mesh available at: {mv_mesh_path}")
+    except Exception as exc:
+        logging.warning(f"Multi-view fusion failed: {exc}")
+    timer.end("Multi-view depth fusion")
+
+# --- Phase 7 (optional): send mesh to a remote AI service for extra cleanup or back-side detail ---
+if first_mesh_path and os.path.exists(first_mesh_path) and args.refine_api_url:
+    input_img_for_refine = os.path.join(os.path.dirname(first_mesh_path), "input.png")
+    first_mesh_path, first_texture_path = refine_mesh_with_ai(
+        mesh_path=first_mesh_path,
+        texture_path=first_texture_path,
+        input_image_path=input_img_for_refine if os.path.exists(input_img_for_refine) else None,
+        output_dir=os.path.dirname(first_mesh_path),
+        api_url=args.refine_api_url,
+        api_key=args.refine_api_key,
+    )
+
+# --- Phase 8 (optional): open an interactive 3D preview; user can save GLB from there ---
 if not args.no_viewer and first_mesh_path and os.path.exists(first_mesh_path):
     logging.info("Opening 3D viewer...")
     input_png = os.path.join(os.path.dirname(os.path.abspath(first_mesh_path)), "input.png")
@@ -285,5 +424,6 @@ if not args.no_viewer and first_mesh_path and os.path.exists(first_mesh_path):
             title_prefix="TripoSR",
         )
     except Exception as e:
+        # On Windows, fall back to whatever app is registered for .obj/.glb files.
         logging.warning(f"Python viewer failed: {e}. Opening with system default...")
         os.startfile(os.path.abspath(first_mesh_path))

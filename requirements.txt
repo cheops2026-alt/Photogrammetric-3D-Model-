@@ -13,3 +13,5 @@ xatlas==0.0.9
 moderngl==5.10.0
 opencv-python
 pyvista
+timm
+scipy

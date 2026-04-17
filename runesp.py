@@ -1,5 +1,5 @@
 # Photogrammetric-3D-Model - ESP32-CAM capture & 3D reconstruction
-# ESP32-CAM URL: http://10.108.20.54
+# ESP32-CAM URL: http://172.20.10.4
 import argparse
 import logging
 import os
@@ -20,7 +20,7 @@ from tsr.bake_texture import bake_texture
 from model_utils import refine_mesh_with_ai, export_glb, show_viewer
 
 
-ESP32_BASE_URL   = "http://10.108.20.54"
+ESP32_BASE_URL   = "http://172.20.10.4"
 ESP32_STREAM_URL = f"{ESP32_BASE_URL}:81/stream"   # MJPEG stream
 ESP32_SNAP_URL   = f"{ESP32_BASE_URL}/capture"     # single JPEG snapshot
 
@@ -65,12 +65,17 @@ def capture_photo_esp32(
 
     # Try MJPEG stream first
     stream = None
+    stream_iter = None
     try:
         stream = requests.get(stream_url, stream=True, timeout=5)
         if stream.status_code != 200:
             stream = None
+        else:
+            # IMPORTANT: iter_content() can only be consumed once; keep a single iterator.
+            stream_iter = stream.iter_content(chunk_size=4096)
     except Exception:
         stream = None
+        stream_iter = None
 
     if stream:
         logging.info("MJPEG stream connected.")
@@ -83,25 +88,52 @@ def capture_photo_esp32(
     mjpeg_buf       = bytes()
     window_name     = "ESP32-CAM - TripoSR Capture"
 
-    def next_frame_from_stream(s) -> np.ndarray | None:
+    def next_frame_from_stream(it) -> np.ndarray | None:
         """Parse one JPEG frame from the MJPEG byte stream."""
         nonlocal mjpeg_buf
-        for chunk in s.iter_content(chunk_size=4096):
-            mjpeg_buf += chunk
-            start = mjpeg_buf.find(b"\xff\xd8")  # JPEG SOI marker
-            end   = mjpeg_buf.find(b"\xff\xd9")  # JPEG EOI marker
-            if start != -1 and end != -1 and end > start:
-                jpg = mjpeg_buf[start : end + 2]
-                mjpeg_buf = mjpeg_buf[end + 2 :]
-                arr = np.frombuffer(jpg, dtype=np.uint8)
-                frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-                return frame
+        try:
+            for chunk in it:
+                if not chunk:
+                    continue
+                mjpeg_buf += chunk
+                start = mjpeg_buf.find(b"\xff\xd8")  # JPEG SOI marker
+                end   = mjpeg_buf.find(b"\xff\xd9")  # JPEG EOI marker
+                if start != -1 and end != -1 and end > start:
+                    jpg = mjpeg_buf[start : end + 2]
+                    mjpeg_buf = mjpeg_buf[end + 2 :]
+                    arr = np.frombuffer(jpg, dtype=np.uint8)
+                    frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+                    return frame
+        except requests.exceptions.StreamConsumedError:
+            # Will be handled by reconnect logic in the main loop.
+            return None
+        except Exception:
+            return None
         return None
 
     while True:
         # --- Get frame ---
-        if stream:
-            frame = next_frame_from_stream(stream)
+        if stream and stream_iter is not None:
+            frame = next_frame_from_stream(stream_iter)
+            if frame is None:
+                # Reconnect stream (handles StreamConsumedError / dropouts)
+                try:
+                    stream.close()
+                except Exception:
+                    pass
+                stream = None
+                stream_iter = None
+                try:
+                    stream = requests.get(stream_url, stream=True, timeout=5)
+                    if stream.status_code == 200:
+                        stream_iter = stream.iter_content(chunk_size=4096)
+                        logging.info("MJPEG stream reconnected.")
+                    else:
+                        stream = None
+                        stream_iter = None
+                except Exception:
+                    stream = None
+                    stream_iter = None
         else:
             frame = fetch_esp32_snapshot(snap_url)
             time.sleep(0.05)          # ~20 fps polling limit
